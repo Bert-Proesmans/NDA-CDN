@@ -1,10 +1,14 @@
 import sys
+import os
 import time
 import logging
 import signal
 import threading
+import mimetypes
+import pathlib
 
 from google.cloud import storage
+from google.cloud.exceptions import GoogleCloudError
 from watchdog.observers import Observer
 from watchdog.events import LoggingEventHandler, FileSystemEventHandler
 
@@ -14,12 +18,16 @@ OBSERVER = None
 LOGGER = None
 # Object blocking main thread until it should shutdown.
 SHUTDOWN_EVENT = None
+# Object representing the cloud storage medium.
+CDN_BUCKET = None
+# Object for guessing the MIME type and encoding of a file.
+TYPE_GUESSER = None
 
 ### Build logging infrastructure ###
 logging.basicConfig(level=logging.DEBUG,
                     #format='%(asctime)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
-LOGGER = logging.getLogger("Watcher")
+LOGGER = logging.getLogger(__name__) # Root logger
 LOGGER.info("Logger initialised")
 
 ### Build Shutdown event ###
@@ -46,31 +54,78 @@ def termination_signal_handler(signal, frame):
 signal.signal(signal.SIGTERM, termination_signal_handler)
 signal.signal(signal.SIGINT, termination_signal_handler)
 
+### Configure type guesser ###
+mimetypes.init()
+TYPE_GUESSER = mimetypes.MimeTypes()
 
 #############
 ## Methods ##
 #############
 
-def upload_file(file_stream, filename):
+def configure_cloud_bucket():
+    """
+    Builds connection to google cloud.
+    """
+    global CDN_BUCKET
+    global LOGGER
+
+    client = storage.Client(project='labo-cdn')
+    CDN_BUCKET = client.bucket('labo-cdn.appspot.com')
+    
+    LOGGER.info("Cloud connection succesfully setup")
+
+    return True
+
+def upload_file(file_path):
     """
     Uploads the given file to google cloud.
+    The blob data will be overwritten if a blob with the same filename
+    is already present!
 
-    file_stream: 
+    file_name: Absolute path to the file to be uploaded.
     """
-    client = storage.Client()
-    bucket = client.bucket('labo-cdn.appspot.com')
-    blob = bucket.blob(filename)
-    success = False
+    global CDN_BUCKET
+    global LOGGER
+    global TYPE_GUESSER
 
-    blob.upload_from_file(file_stream)
-    blob.make_public()
-    url = blob.public_url
+    try:
+        abs_path = os.path.abspath(file_path)
+        uri_path = pathlib.Path(abs_path).as_uri()
+        file_name = pathlib.Path(abs_path).name
+    except ValueError as error:
+        LOGGER.exception(error)
+        return ("", False)
 
-    if url:
-        success = True
-        url = url.decode('utf-8')
+    try:
+        # Build new blob object
+        blob = storage.Blob(file_name, CDN_BUCKET)
 
-    return (url, success)
+        # Guess content type (and encoding)
+        (content_type, encoding) = TYPE_GUESSER.guess_type(uri_path)
+
+        # Upload file.
+        with open(file_name, 'rb') as file_stream: # OSError
+            # Because of a lack of object versioning policies
+            # the blob data will overwrite previous data for existing
+            # blobs with the same filename.
+            blob.upload_from_file(file_stream)
+        
+        # Configure file.
+        if content_type:
+            blob.content_type = content_type
+        if encoding:
+            blob.content_encoding = encoding
+        blob.make_public()
+        # Commit changes to the cloud.
+        blob.patch()
+
+        # Get resource url, which is a Unicode string.
+        url = blob.public_url
+
+        return (url, True)
+    except GoogleCloudError as error:
+        LOGGER.exception(error)
+        return ("", False)
 
 class FSEventHandler(FileSystemEventHandler):
     """
@@ -78,7 +133,8 @@ class FSEventHandler(FileSystemEventHandler):
     consequence of a filesystem change.
     """
     def __init__(self, logger):
-        self.logging = logger
+        self.logging = logger.getChild('Watcher')
+        self.expect_directory_modification = False
 
     def on_any_event(self, event):
         """
@@ -104,6 +160,13 @@ class FSEventHandler(FileSystemEventHandler):
         what = 'directory' if event.is_directory else 'file'
         self.logging.info("Created %s: %s", what, event.src_path)
 
+        if what is 'file':
+            (url, success) = upload_file(event.src_path)
+            if success:
+                self.logging.info("CDN-URL: %s", url)
+            else:
+                self.logging.error("Failed to upload file to CDN!")
+
     def on_deleted(self, event):
         """
         event: DirDeletedEvent / FileDeletedEvent
@@ -122,11 +185,12 @@ class FSEventHandler(FileSystemEventHandler):
         what = 'directory' if event.is_directory else 'file'
         self.logging.info("Modified %s: %s", what, event.src_path)
 
-
-
-# if len(sys.argv) is 2:
-#     with open(sys.argv[1], 'rb') as f:
-#         print(upload_file(f, sys.argv[1]))
+        if what is 'file':
+            (url, success) = upload_file(event.src_path)
+            if success:
+                self.logging.info("CDN-URL: %s", url)
+            else:
+                self.logging.error("Failed to upload file to CDN!")
 
 def main(path):
     global OBSERVER
@@ -162,7 +226,8 @@ if __name__ == "__main__":
     path = sys.argv[1] if len(sys.argv) > 1 else '.'
     LOGGER.debug("Target path: `%s`", path)
     try:
-        main(path)
+        if configure_cloud_bucket() is True:
+            main(path)
         LOGGER.info("Finishing program")
     except Exception as error:
         LOGGER.exception(error)
