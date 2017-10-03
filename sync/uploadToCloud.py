@@ -6,6 +6,7 @@ import signal
 import threading
 import mimetypes
 import pathlib
+import html
 
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
@@ -76,35 +77,36 @@ def configure_cloud_bucket():
 
     return True
 
-def upload_file(file_path):
+def upload_file(file_path, watch_dir_path):
     """
     Uploads the given file to google cloud.
     The blob data will be overwritten if a blob with the same filename
     is already present!
 
-    file_name: Absolute path to the file to be uploaded.
+    file_path: Path object of the file to be uploaded.
+    watch_dir_path: Path object of the folder being watched.
     """
     global CDN_BUCKET
     global LOGGER
     global TYPE_GUESSER
 
-    try:
-        abs_path = os.path.abspath(file_path)
-        uri_path = pathlib.Path(abs_path).as_uri()
-        file_name = pathlib.Path(abs_path).name
-    except ValueError as error:
-        LOGGER.exception(error)
+    if file_path.exists() is False:
+        LOGGER.error("The path `%s` doesn't exist!", file_path.as_posix())
         return ("", False)
+
+    # Constructs path exerpt relative to the watch_dir.
+    # file_name keeps it's structure from underneath the watched directory.
+    file_name_exerpt = file_path.relative_to(watch_dir_path)
 
     try:
         # Build new blob object
-        blob = storage.Blob(file_name, CDN_BUCKET)
+        blob = storage.Blob(file_name_exerpt.as_posix(), CDN_BUCKET)
 
         # Guess content type (and encoding)
-        (content_type, encoding) = TYPE_GUESSER.guess_type(uri_path)
+        (content_type, encoding) = TYPE_GUESSER.guess_type(file_path.as_posix())
 
         # Upload file.
-        with open(file_name, 'rb') as file_stream: # OSError
+        with open(file_path.as_posix(), 'rb') as file_stream: # OSError
             # Because of a lack of object versioning policies
             # the blob data will overwrite previous data for existing
             # blobs with the same filename.
@@ -132,9 +134,10 @@ class FSEventHandler(FileSystemEventHandler):
     Object responding to events coming from the observer as a 
     consequence of a filesystem change.
     """
-    def __init__(self, logger):
+    def __init__(self, logger, watched_path):
         self.logging = logger.getChild('Watcher')
         self.expect_directory_modification = False
+        self.watched_path = watched_path
 
     def on_any_event(self, event):
         """
@@ -148,8 +151,11 @@ class FSEventHandler(FileSystemEventHandler):
         """
         super().on_moved(event)
 
+        src_path = pathlib.Path(event.src_path)
+        dest_path = pathlib.Path(event.dest_path)
+
         what = 'directory' if event.is_directory else 'file'
-        self.logging.info("Moved %s: from %s to %s", what, event.src_path, event.dest_path)
+        self.logging.info("Moved %s: from %s to %s", what, src_path.as_posix(), dest_path.as_posix())
 
     def on_created(self, event):
         """
@@ -157,13 +163,15 @@ class FSEventHandler(FileSystemEventHandler):
         """
         super().on_created(event)
 
+        target_path = pathlib.Path(event.src_path)
+
         what = 'directory' if event.is_directory else 'file'
-        self.logging.info("Created %s: %s", what, event.src_path)
+        self.logging.info("Created %s: %s", what, target_path.as_posix())
 
         if what is 'file':
-            (url, success) = upload_file(event.src_path)
+            (url, success) = upload_file(target_path, self.watched_path)
             if success:
-                self.logging.info("CDN-URL: %s", url)
+                self.logging.info("CDN-URL: %s", html.unescape(url))
             else:
                 self.logging.error("Failed to upload file to CDN!")
 
@@ -173,8 +181,10 @@ class FSEventHandler(FileSystemEventHandler):
         """
         super().on_deleted(event)
 
+        src_path = pathlib.Path(event.src_path)
+
         what = 'directory' if event.is_directory else 'file'
-        self.logging.info("Deleted %s: %s", what, event.src_path)
+        self.logging.info("Deleted %s: %s", what, src_path.as_posix())
 
     def on_modified(self, event):
         """
@@ -182,24 +192,33 @@ class FSEventHandler(FileSystemEventHandler):
         """
         super().on_modified(event)
 
+        src_path = pathlib.Path(event.src_path)
+
         what = 'directory' if event.is_directory else 'file'
-        self.logging.info("Modified %s: %s", what, event.src_path)
+        self.logging.info("Modified %s: %s", what, src_path.as_posix())
 
         if what is 'file':
-            (url, success) = upload_file(event.src_path)
+            (url, success) = upload_file(src_path, self.watched_path)
             if success:
-                self.logging.info("CDN-URL: %s", url)
+                self.logging.info("CDN-URL: %s", html.unescape(url))
             else:
                 self.logging.error("Failed to upload file to CDN!")
 
-def main(path):
+def main(watchdir_path):
+    """
+    Main entry point for the file watcher.
+
+    watchdir_path: Path object of the watch directory.
+    """
     global OBSERVER
     global LOGGER
     global SHUTDOWN_EVENT
 
-    event_handler = FSEventHandler(LOGGER)
+    LOGGER.info("Provided path: %s", watchdir_path.as_posix())
+
+    event_handler = FSEventHandler(LOGGER, watchdir_path)
     OBSERVER = Observer()
-    OBSERVER.schedule(event_handler, path, recursive=True)
+    OBSERVER.schedule(event_handler, watchdir_path.as_posix(), recursive=True)
 
     OBSERVER.start()
     LOGGER.debug("Observer started")
@@ -222,12 +241,18 @@ def main(path):
 ################
 
 if __name__ == "__main__":
+    LOGGER.debug("Starting program")
     # Fallback to current CWD when no path is provided.
-    path = sys.argv[1] if len(sys.argv) > 1 else '.'
-    LOGGER.debug("Target path: `%s`", path)
+    path = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+
     try:
+        abs_path = os.path.abspath(path)
+        path_obj = pathlib.Path(abs_path)
+        if path_obj.is_dir() is False:
+            raise ValueError("Provided path is NOT a directory or doesn't exist")
+        
         if configure_cloud_bucket() is True:
-            main(path)
+            main(path_obj)
         LOGGER.info("Finishing program")
     except Exception as error:
         LOGGER.exception(error)
