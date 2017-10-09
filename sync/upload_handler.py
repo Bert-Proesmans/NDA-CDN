@@ -59,8 +59,10 @@ class UploadHandler:
     def queue_file_upload(self, file_path):
         if not isinstance(file_path, pathlib.PurePath):
             raise ValueError("Provided parameter is NOT a PATH object")
+        if not file_path.exists():
+            self.logger.warn("File `%s` doesn't exist!", file_path.as_posix())
+            
         self.upload_queue.put(file_path)
-
         while not self.upload_queue.empty():
             next_item = self.upload_queue.get()
             if not next_item.exists():
@@ -95,6 +97,37 @@ class UploadHandler:
                 (pub_url, result) = self._upload_file(file_stream, file_name, type_result)
                 if result:
                     self.logger.info("File uploaded at %s", pub_url)
+
+    def remove_file(self, file_path):
+        if not isinstance(file_path, pathlib.PurePath):
+            raise ValueError("Provided parameter is NOT a PATH object")
+
+        # Guess file-type.
+        # (content_type, encoding)
+        # type_result = self.type_guesser.guess_type(file_path.as_posix())
+        file_name = None
+
+        # Processors should be able to construct a cloud filename 
+        # because it can be placed somewhere else than the default place.
+
+        if not file_name:
+            try:
+                # Construct item name relative to the watched path
+                file_name = self.get_cdn_name_exerpt(file_path)
+            except ValueError:
+                self.logger.warn("Found a file `%s` which is not located under the watch directory!", file_path.as_posix())
+
+        self._remove_file(file_name)
+        
+    def _remove_file(self, file_name):
+        blob = storage.Blob(file_name, self.bucket)
+        try:
+            blob.delete()
+            blob.patch()
+            self.logger.info("Removed `%s` from cloud", file_name)
+        except GoogleCloudError:
+            self.logger.error("The file `%s` wasn't found online", file_name)
+
 
     def _upload_file(self, file_stream, file_name, type_result):
         try:
