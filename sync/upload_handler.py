@@ -75,13 +75,13 @@ class UploadHandler:
                 file_stream = file_stream_orig
                 # Push filename and stream through each processor
                 for p in self.processors:
-                    (file_stream, file_name, new_files) = p.process_file(file_stream, file_path, type_result)
-                    if hasattr(new_files, "__iter__"):
-                        for new_file in new_files:
-                            if not isinstance(new_file, pathlib.PurePath):
+                    (file_stream, file_name, referenced_files) = p.process_file(file_stream, file_path, type_result)
+                    if referenced_files and hasattr(referenced_files, "__iter__"):
+                        for ref_path in referenced_files:
+                            if not isinstance(ref_path, pathlib.PurePath):
                                 self.logger.warn("A returned new file item is NOT a PATH object!")
                                 continue
-                            self.upload_queue.put(new_file)
+                            self.upload_queue.put(ref_path)
 
                 if not file_name:
                     try:
@@ -91,6 +91,7 @@ class UploadHandler:
                         self.logger.warn("Found a file `%s` which is not located under the watch directory!", next_item.as_posix())
 
                 # .. and push file to cloud
+                self.logger.info("Uploading `%s` to cloud", next_item.as_posix())
                 (pub_url, result) = self._upload_file(file_stream, file_name, type_result)
                 if result:
                     self.logger.info("File uploaded at %s", pub_url)

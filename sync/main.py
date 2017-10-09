@@ -1,3 +1,4 @@
+import argparse
 import sys
 import os
 import time
@@ -20,8 +21,23 @@ def main(logger):
     """
 
     logger.debug("Starting main")
+
+    arg_parser = argparse.ArgumentParser(description="Watch a provided folder and upload files to the cloud")
+    
+    arg_parser.add_argument("-wd", "--watch_dir", type=str, default='',
+                            help="the directory to watch filesystem events for")
+    arg_parser.add_argument("-n", "--namespace", type=str, default='',
+                            help="the namespace for storing files on the cloud")
+
+    args = arg_parser.parse_args()
+
     # Fallback to current CWD when no path is provided.
-    path = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+    if args.watch_dir:
+        path = args.watch_dir
+    else:
+        path = os.getcwd()
+
+    namespace = args.namespace
 
     ##############
     # Path processing
@@ -36,13 +52,13 @@ def main(logger):
     # Processor setup
     ###################
     processors = [
-        HTMLHandler(logger)
+        HTMLHandler(logger, watchdir_path)
     ]
 
     #############
     # Handler setup
     ###################
-    upload_handler = UploadHandler(logger, 'labo-cdn.appspot.com', '', watchdir_path, processors)
+    upload_handler = UploadHandler(logger, 'labo-cdn.appspot.com', namespace, watchdir_path, processors)
 
     event_handler = watchdog_handling.FSEventHandler(logger, watchdir_path, upload_handler)
     observer = Observer()
