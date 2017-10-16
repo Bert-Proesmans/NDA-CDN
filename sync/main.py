@@ -111,7 +111,7 @@ def main(logger):
 
 if __name__ == "__main__":
     ### Build logging infrastructure ###
-    logging.basicConfig(level=logging.DEBUG,
+    logging.basicConfig(level=logging.INFO,
                         #format='%(asctime)s - %(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S')
     ROOT_LOGGER = logging.getLogger(__name__) # Root logger

@@ -8,13 +8,18 @@ from google.cloud.exceptions import GoogleCloudError
 
 from processors.processor import BaseProcessor
 
+class CheckableQueue(queue.Queue):
+    def __contains__(self, item):
+        with self.mutex:
+            return item in self.queue
+
 class UploadHandler:
     def __init__(self, logger, cdn_bucket_name, cdn_namespace, watchdir_path, processors):
         self.logger = logger.getChild('Uploader')
         self.client = None
         self.bucket = None
         self.processors = []
-        self.upload_queue = queue.Queue()
+        self.upload_queue = CheckableQueue()
         self.type_guesser = mimetypes.MimeTypes()
 
         assert isinstance(cdn_namespace, str), 'Namespace name MUST be a string!'
@@ -65,7 +70,7 @@ class UploadHandler:
         self.upload_queue.put(file_path)
         while not self.upload_queue.empty():
             next_item = self.upload_queue.get()
-            if not next_item.exists():
+            if not next_item.is_file():
                 continue
 
             # Guess file-type.
@@ -83,7 +88,8 @@ class UploadHandler:
                             if not isinstance(ref_path, pathlib.PurePath):
                                 self.logger.warn("A returned new file item is NOT a PATH object!")
                                 continue
-                            self.upload_queue.put(ref_path)
+                            if ref_path not in self.upload_queue and ref_path != next_item:
+                                self.upload_queue.put(ref_path)
 
                 if not file_name:
                     try:

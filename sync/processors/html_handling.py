@@ -37,7 +37,7 @@ class HTMLHandler(BaseProcessor):
 
     def process_file(self, file_stream, orig_file_path, type_result):
         (content_type, _) = type_result
-        if "html" not in content_type:
+        if not content_type or "html" not in content_type:
             self.logger.debug("Skipping non-HTML data")
             return (file_stream, None, None)
 
